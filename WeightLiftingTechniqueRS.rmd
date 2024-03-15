@@ -1,0 +1,402 @@
+---
+title: 'Weight Lifting Technique: Predictions'
+author: "Rona Stewart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, results = "hide")
+library(dplyr); library(caret); library(ggplot2); library(gbm); library(randomForest)
+
+### Download the relevant data
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+## Executive Summary
+
+The objective of this project is to develop a model and use this to predict whether the correct technique is used when lifting weights or not.  The model will take data generated from accelerometers on the belt, forearm, arm, and dumbbell (each of which provide 38 outputs) of six participants who were asked to perform barbell lifts correctly and incorrectly in five different ways.  
+
+Initial exploratory analysis was conducted, considering boxplots of potential predictors against the outcome (see Appendix 2), and to create an initial exploratory model and assess the variables of greatest importance in this.  Based on this initial exploratory analysis, 14 potential predictor variables were identified.  
+
+Using those 14 variables, a range of models were considered using different modelling techniques.  The confusion matrices for these models are provided in Appendix 3.  Based on this, and assessing the incremental accuracy of a stacked model, three fits were tested on the validation dataset.  The final model selected was that created using the random forest method, which resulted in a 97% accuracy when tested on the validation dataset.
+
+Based on this, predictions for the next 20 records include 7 in classe A, 8 in classe B, 1 in each of classes C and D and 3 in classe E (see Appendix 4).
+
+## Data Partition
+Prior to conducting any analysis or model fitting, the training data is further split to enable initial assessments of the model fit on a validation set.
+
+```{r datapartition, echo = TRUE}
+### Set seed to ensure reproducability of results
+set.seed(1240)
+### Create a vector identifying those elements for the training set
+inTrain <- createDataPartition(y = training$classe, p=0.7, list = FALSE)
+train <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+## Dimension Reduction
+As there are a large number of potential predictor variables (`r ncol(train)-1`), the first exercise is to reduce this number to a more practical number for consideration in fitting a model.  This is done by:  
+  
+  * Removing the variables which are identifiers (original columns 1:7),  
+  * Removing the variables with a near zero variance as these are unlikely to be useful predictors, and  
+  * Removing the variables which consist mainly of NA values  
+
+```{r datatidy}
+### Amend the class of data fields as necessary
+train$classe <- as.factor(train$classe)
+validation$classe <- as.factor(validation$classe)
+
+### Subset data to remove identifier variables
+train <- train[, -c(1:7)]
+validation <- validation[, -c(1:7)] 
+
+### Remove predictors with near zero variance
+nzv <- nearZeroVar(train,saveMetrics = TRUE)
+nearZeroVars <- nzv[nzv$zeroVar==TRUE|nzv$nzv==TRUE,]
+train <- train[, !names(train) %in% rownames(nearZeroVars)]
+
+### Remove predictors with high proportion (>90%) NA values
+navars <- NULL
+for (i in (1:ncol(train))){
+        naratio <-  sum(is.na(train[,i]))/nrow(train)
+        if (naratio>=0.9){
+                navars <- c(navars,names(train)[i])      
+        }
+} 
+train <- train[, !names(train) %in% navars]
+
+### Replace NAs with 0
+train[is.na(train)] <- 0
+```
+
+
+## Exploratory Analysis
+
+The training data set has `r nrow(train)` observations of `r ncol(train)` variables (including the outcome variable, "classe".  As such these variables are retained in the dataset of interest and used for exploratory analysis. Initially, boxplots were created to consider where there were apparent differences in the outcome (classe) based on the range of predictor variables.  These are included at Appendix 2.  From these plots, the following were identified as potentially powerful predictor variables:  
+  
+  * roll_belt, total_accel_belt, yaw_belt;  
+  * accel_arm_x, magnet_arm_x; and  
+  * pitch_forearm  
+
+```{r exploratorymodel, echo=FALSE}
+### Produce an initial model using random forest method predicting classe using all remaining variables
+explormod <- train(classe~., train, method = "rpart")
+```
+  
+As a second method of identifying powerful predictors, an initial exploratory model is fit using the standard random tree method and all `r ncol(train)-1` potential predictor variables (note that random tree was selected as a starting point for expediency, as a method including bagging would likely have a very high run time).  The variable importance from this exploratory model is shown in the below graph. 
+
+```{r explormodImpGraph, results="asis"}
+### Present a graph of the variable importance calculated by the explormod
+featImp <- varImp(explormod)
+ggplot(featImp, aes(x = rownames(featImp), y = MeanDecreaseAccuracy)) +
+        geom_bar(stat = "identity", fill = "skyblue") +
+        labs(x = "Feature", y = "Importance") +
+        theme_minimal()
+```
+
+Given that all of the features identified from the exploratory graphs are covered in those features with importance greater than zero in the exploratory model, the features that will be used in the model building stage are:   
+  
+  * `r rownames(featImp$importance)[1:14]`
+  
+## Model Development
+```{r modelbuild, fig.show = "hide"}
+### First, create objects identifying the outcome and predictor variables
+outcome <- train$classe
+predvarnames <- rownames(featImp$importance)[1:14]
+predvars <- train[,predvarnames]
+
+### Secondly, create a series of models using different methods to assess the accuracy of each
+set.seed(58612)
+mod1 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "lda") ### using linear discriminate analysis
+mod2 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "rpart") ### using random tree
+mod3 <- randomForest:: randomForest(predvars, outcome) ### using random forest (note different package for computational speed)
+mod4 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "gbm", verbose = FALSE) ### using boosting with trees
+```
+
+Taking those 14 variables which are potentially powerful predictors then, a series of models are built.  The below table sets out the model reference number, the method used, and the accuracy of the model (in-sample).
+
+```{r models, results = "markup", fig.show = "hide"}
+### Create a table summarising the results of the different models 
+refs <- 1:4
+methods <- c("Linear Discriminate Analysis", "Random Tree", "Random Forest", "Boosting with Trees")
+cm1 <- confusionMatrix(mod1)
+cm2 <- confusionMatrix(mod2)
+cm3 <- mod3$confusion
+cm4 <- confusionMatrix(mod4)
+accuracy <- c(round(sum(diag(cm1[[1]]))/sum(cm1[[1]]),3), round(sum(diag(cm2[[1]]))/sum(cm2[[1]]),3), round(sum(diag(cm3[,1:5]))/sum(cm3[,1:5]),3), round(sum(diag(cm4[[1]]))/sum(cm4[[1]]),3))
+table1 <- data.frame(Ref = refs, Method = methods, Accuracy = accuracy)
+        
+print(table1)
+```
+
+Given that there are still a large number (14) of predictors, there is a risk of overfitting.  As a result, the models are re-run, using only the top five predictors for each model to assess the reduction in accuracy: 
+
+```{r models2, results = "markup", fig.show='hide'}
+### Assess the top 5 predictors for each model and re-perform the models based on these alone
+mod1pred <- rownames(varImp(mod1)$importance)[1:5]
+mod1a <- train(classe~., data = train[,c(mod1pred,"classe")], method = "lda")
+mod2pred <- rownames(varImp(mod2)$importance)[1:5]
+mod2a <- train(classe~., data = train[,c(mod2pred,"classe")], method = "rpart")
+mod3pred <- rownames(importance(mod3))[order(importance(mod3), decreasing = TRUE)[1:5]]
+mod3a <- randomForest:: randomForest(train[,mod3pred], outcome)
+mod4pred <- rownames(summary.gbm(mod4$finalModel))[1:5]
+mod4a <- train(classe~., data = train[,c(mod4pred,"classe")], method = "gbm", verbose = FALSE)
+
+### Create a table summarising the results of the reduced variable models
+cm1a <- confusionMatrix(mod1a)
+cm2a <- confusionMatrix(mod2a)
+cm3a <- mod3a$confusion
+cm4a <- confusionMatrix(mod4a)
+accuracy2 <- c(round(sum(diag(cm1a[[1]]))/sum(cm1a[[1]]),3), round(sum(diag(cm2a[[1]]))/sum(cm2a[[1]]),3), round(sum(diag(cm3a[,1:5]))/sum(cm3a[,1:5]),3), round(sum(diag(cm4a[[1]]))/sum(cm4a[[1]]),3))
+
+table2 <- data.frame(table1, Reduced_predictor_accuracy = accuracy2)
+print(table2)
+```
+
+Given the relatively small decrease in accuracy, and the use of the same top five predictors, models 3a and 4a will be used to reduce the risk of bias.  Based on this, a stacked model is created using models 3a and 4a from above to assess whether this further enhances the accuracy. 
+```{r stackedmodel}
+### First create predictions using each of the models
+pred3atr <- predict(mod3a, newdata = train)
+pred4atr <- predict(mod4a, newdata = train)
+predDF <- data.frame(RFpred = pred3atr, GBMpred = pred4atr, classe = train$classe)
+
+### Create a new model based on the predictions
+combModFit <- randomForest:: randomForest (classe~., data=predDF)
+cmcm <- combModFit$confusion
+```
+
+The random forest method is used to combine the models, resulting in an accuracy of `r round(sum(diag(cmcm[,1:5]))/sum(cmcm[,1:5]),3)`.
+
+
+## Model Evaluation
+
+Finally, using the models 3a, 4a and the combined model generated above, predictions are made and evaluated on the validation set to assess the out-of-sample accuracy. 
+
+```{r validation, fig.show='hide'}
+### Create a vector of the predictor variables used
+predictors <- rownames(summary.gbm(mod4a$finalModel))
+
+### Reduce the validation dataset to only variables of interest
+validation <- validation [,c(predictors, "classe")]
+
+### Create predictions using each of the three models
+pred3av <- predict (mod3a, newdata = validation)
+pred4av <- predict (mod4a, newdata = validation)
+predCMv <- predict (combModFit, newdata = data.frame(RFpred = pred3av, GBMpred = pred4av, validation$classe))
+
+### Create a table of the results (T = correct prediction, F = incorrect)
+table3 <- data.frame(RF = (pred3av == validation$classe), GBM = (pred4av == validation$classe), Stacked = (predCMv == validation$classe))
+
+### Assess the out-of-sample accuracy for each
+accuracy3a <- sum(table3$RF) / nrow(table3)
+accuracy4a <- sum(table3$GBM) / nrow(table3)
+accuracyCM <- sum(table3$Stacked) / nrow(table3)
+```
+
+These can be summarised as:  
+  
+  * Model 3a (using random forest, 5 variables) accuracy is `r round(accuracy3a,3)`  
+  * Model 4a (using boosting with trees, 5 variables) accuracy is `r round(accuracy4a,3)`  
+  * Staked model (combining models 3a and 4a) accuracy is `r round(accuracyCM,3)`
+
+## Conclusion
+As the out-of-sample accuracy rate is highest using the random forest algorithm (ref 3a), this is used to create predictions on the test sample.  Note that the accuracy of these predictions cannot be provided in this report, as the observed outcomes are not yet known, however the predictions are included at appendix 4. 
+
+\pagebreak
+
+## Appendix 1: Environment
+The environment this analyses was undertaken in is described below:  
+* Date at which data obtained from url's: `r Sys.Date()`
+* OS: Windows  
+* CPU: intel COREi5  
+* Software: RStudio 2023.12.1+402 "Ocean Storm" Release (4da58325ffcff29d157d9264087d4b1ab27f7204, 2024-01-28) for windows, Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) RStudio/2023.12.1+402 Chrome/116.0.5845.190 Electron/26.2.4 Safari/537.36  
+* R version 4.3.2 (2023-10-31 ucrt), Platform: x86_64-w64-mingw32/x64 (64-bit)  
+* RStudio libraries: dplyr, caret, ggplot2, gbm, randomForest
+
+\pagebreak
+
+## Appendix 2: Exploratory Boxplots
+
+```{r boxplots, echo = TRUE, results = "asis"}
+par(mfrow = c(4,3), mar = c(1,1,1,1))
+for(i in 1:(ncol(train)-1))plot(train$classe, train[,i], main = c("Class by ",names(train[i])), col = c("lightblue","thistle", "palegreen3", "tomato", "violet" ))
+```
+
+\pagebreak
+
+## Appendix 3: Confusion Matrices
+```{r confusionMatrices, results = "markup", echo = TRUE}
+### Model 1 (LDA, 14 variables)
+cm1
+### Model 1a (LDA, 5 variables)
+cm1a
+### Model 2 (rpart, 14 variables)
+cm2
+### Model 2a (rpart, 5 variables)
+cm2a
+### Model 3 (rf, 14 variables)
+cm3
+### Model 3a (rf, 5 variables)
+cm3a
+### Model 4 (gbm, 14 variables)
+cm4
+### Model 4a (gbm, 5 variables)
+cm4a
+### Stacked Model
+cmcm
+```
+
+\pagebreak
+## Appendix 4: Test Predictions
+
+```{r testing, results = "markup", echo = TRUE}
+### Then the model can be run on the data in test to create predictions
+testpred <- predict(mod3a, newdata = testing[,c(predictors,"problem_id")])
+summary(testpred)
+```
+
+\pagebreak
+## Appendix 5: R Code
+```{r setupcode, echo = TRUE, eval = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, results="hide")
+library(dplyr); library(caret); library(ggplot2); library(gbm); library(randomForest)
+
+### Download the relevant data
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+```{r datapartitioncode, echo = TRUE, eval = FALSE}
+### Set seed to ensure reproducability of results
+set.seed(1240)
+### Create a vector identifying those elements for the training set
+inTrain <- createDataPartition(y = training$classe, p=0.7, list = FALSE)
+train <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+```{r datatidycode, echo = TRUE, eval = FALSE}
+### Amend the class of data fields as necessary
+train$classe <- as.factor(train$classe)
+validation$classe <- as.factor(validation$classe)
+
+### Subset data to remove identifier variables
+train <- train[, -c(1:7)]
+validation <- validation[, -c(1:7)] 
+
+### Remove predictors with near zero variance
+nzv <- nearZeroVar(train,saveMetrics = TRUE)
+nearZeroVars <- nzv[nzv$zeroVar==TRUE|nzv$nzv==TRUE,]
+train <- train[, !names(train) %in% rownames(nearZeroVars)]
+
+### Remove predictors with high proportion (>90%) NA values
+navars <- NULL
+for (i in (1:ncol(train))){
+        naratio <-  sum(is.na(train[,i]))/nrow(train)
+        if (naratio>=0.9){
+                navars <- c(navars,names(train)[i])      
+        }
+} 
+train <- train[, !names(train) %in% navars]
+
+### Replace NAs with 0
+train[is.na(train)] <- 0
+```
+
+```{r exploratorymodelcode, echo=TRUE, eval = FALSE}
+### Produce an initial model using random forest method predicting classe using all remaining variables
+explormod <- train(classe~., train, method = "rpart")
+```
+
+```{r explormodImpGraphcode, echo = TRUE, eval = FALSE}
+### Present a graph of the variable importance calculated by the explormod
+featImp <- varImp(explormod)
+ggplot(featImp, aes(x = rownames(featImp), y = MeanDecreaseAccuracy)) +
+        geom_bar(stat = "identity", fill = "skyblue") +
+        labs(x = "Feature", y = "Importance") +
+        theme_minimal()
+```
+
+```{r modelbuildcode, echo = TRUE, eval = FALSE}
+### First, create objects identifying the outcome and predictor variables
+outcome <- train$classe
+predvarnames <- rownames(featImp$importance)[1:14]
+predvars <- train[,predvarnames]
+
+### Secondly, create a series of models using different methods to assess the accuracy of each
+set.seed(58612)
+mod1 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "lda") ### using linear discriminate analysis
+mod2 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "rpart") ### using random tree
+mod3 <- randomForest:: randomForest(predvars, outcome) ### using random forest (note different package for computational speed)
+mod4 <- train(classe~., data = train[,c(predvarnames,"classe")], method = "gbm", verbose = FALSE) ### using boosting with trees
+```
+
+```{r modelscode, echo = TRUE, eval = FALSE}
+### Create a table summarising the results of the different models 
+refs <- 1:4
+methods <- c("Linear Discriminate Analysis", "Random Tree", "Random Forest", "Boosting with Trees")
+cm1 <- confusionMatrix(mod1)
+cm2 <- confusionMatrix(mod2)
+cm3 <- mod3$confusion
+cm4 <- confusionMatrix(mod4)
+accuracy <- c(round(sum(diag(cm1[[1]]))/sum(cm1[[1]]),3), round(sum(diag(cm2[[1]]))/sum(cm2[[1]]),3), round(sum(diag(cm3[,1:5]))/sum(cm3[,1:5]),3), round(sum(diag(cm4[[1]]))/sum(cm4[[1]]),3))
+table1 <- data.frame(Ref = refs, Method = methods, Accuracy = accuracy)
+        
+print(table1)
+```
+
+```{r models2code, echo = TRUE, eval = FALSE}
+### Assess the top 5 predictors for each model and re-perform the models based on these alone
+mod1pred <- rownames(varImp(mod1)$importance)[1:5]
+mod1a <- train(classe~., data = train[,c(mod1pred,"classe")], method = "lda")
+mod2pred <- rownames(varImp(mod2)$importance)[1:5]
+mod2a <- train(classe~., data = train[,c(mod2pred,"classe")], method = "rpart")
+mod3pred <- rownames(importance(mod3))[order(importance(mod3), decreasing = TRUE)[1:5]]
+mod3a <- randomForest:: randomForest(train[,mod3pred], outcome)
+mod4pred <- rownames(summary.gbm(mod4$finalModel))[1:5]
+mod4a <- train(classe~., data = train[,c(mod4pred,"classe")], method = "gbm", verbose = FALSE)
+
+### Create a table summarising the results of the reduced variable models
+cm1a <- confusionMatrix(mod1a)
+cm2a <- confusionMatrix(mod2a)
+cm3a <- mod3a$confusion
+cm4a <- confusionMatrix(mod4a)
+accuracy2 <- c(round(sum(diag(cm1a[[1]]))/sum(cm1a[[1]]),3), round(sum(diag(cm2a[[1]]))/sum(cm2a[[1]]),3), round(sum(diag(cm3a[,1:5]))/sum(cm3a[,1:5]),3), round(sum(diag(cm4a[[1]]))/sum(cm4a[[1]]),3))
+
+table2 <- data.frame(table1, Reduced_predictor_accuracy = accuracy2)
+print(table2)
+```
+
+```{r stackedmodelcode, echo = TRUE, eval = FALSE}
+### First create predictions using each of the models
+pred3atr <- predict(mod3a, newdata = train)
+pred4atr <- predict(mod4a, newdata = train)
+predDF <- data.frame(RFpred = pred3atr, GBMpred = pred4atr, classe = train$classe)
+
+### Create a new model based on the predictions
+combModFit <- randomForest:: randomForest (classe~., data=predDF)
+cmcm <- combModFit$confusion
+```
+
+```{r validationcode, echo = TRUE, eval = FALSE}
+### Create a vector of the predictor variables used
+predictors <- rownames(summary.gbm(mod4a$finalModel))
+
+### Reduce the validation dataset to only variables of interest
+validation <- validation [,c(predictors, "classe")]
+
+### Create predictions using each of the three models
+pred3av <- predict (mod3a, newdata = validation)
+pred4av <- predict (mod4a, newdata = validation)
+predCMv <- predict (combModFit, newdata = data.frame(RFpred = pred3av, GBMpred = pred4av, validation$classe))
+
+### Create a table of the results (T = correct prediction, F = incorrect)
+table3 <- data.frame(RF = (pred3av == validation$classe), GBM = (pred4av == validation$classe), Stacked = (predCMv == validation$classe))
+
+### Assess the out-of-sample accuracy for each
+error3a <- sum(table3$RF) / nrow(table3)
+error4a <- sum(table3$GBM) / nrow(table3)
+errorCM <- sum(table3$Stacked) / nrow(table3)
+```
